@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,14 +16,19 @@ import (
 	"github.com/go-echarts/go-echarts/v2/opts"
 )
 
+// For websocket 1 API call every 3 mins is allowed
+
+//I want to get Data from the past 6 years
+//Market is open 252 in a given year
+
 const (
 	apiKey  = "YN1TUR6BQZWOUNTG"
-	symbol1 = "AAPL"
-	symbol2 = "GOOG"
+	symbol1 = "SPY"
+	symbol2 = "NFLX"
 )
 
 func fetchRealTimeData(apiKey string, symbol string) ([]float64, error) {
-	url := fmt.Sprintf("https://www.alphavantage.co/query?function=TIME_SERIES_WEEKLY_ADJUSTED&symbol=%s&apikey=%s", symbol, apiKey)
+	url := fmt.Sprintf("https://www.alphavantage.co/query?function=TIME_SERIES_MONTHLY&symbol=%s&interval=5min&outputsize=compact&apikey=%s", symbol, apiKey)
 	fmt.Println("URL:", url)
 
 	resp, err := http.Get(url)
@@ -41,13 +47,18 @@ func fetchRealTimeData(apiKey string, symbol string) ([]float64, error) {
 		return nil, fmt.Errorf("failed to decode JSON response: %v", err)
 	}
 
-	timeSeriesData, ok := data["Weekly Adjusted Time Series"].(map[string]interface{})
+	timeSeriesData, ok := data["Monthly Time Series"].(map[string]interface{})
 	if !ok {
 		return nil, fmt.Errorf("failed to parse time series data")
 	}
 
 	var prices []float64
+	count := 0
 	for _, entry := range timeSeriesData {
+		if count >= 48 { // Considering 12 months in a year for 4 years
+			break
+		}
+
 		entryData, ok := entry.(map[string]interface{})
 		if !ok {
 			return nil, fmt.Errorf("failed to parse entry data")
@@ -64,32 +75,39 @@ func fetchRealTimeData(apiKey string, symbol string) ([]float64, error) {
 		}
 
 		prices = append(prices, price)
+		count++
 	}
 
 	return prices, nil
 }
 
 func main() {
-	applData, err := fetchRealTimeData(apiKey, symbol1)
+	stockdata1, err := fetchRealTimeData(apiKey, symbol1)
 	if err != nil {
 		log.Fatal("Failed to fetch real-time data:", err)
 	}
 
-	msftData, err := fetchRealTimeData(apiKey, symbol2)
+	stockdata2, err := fetchRealTimeData(apiKey, symbol2)
 	if err != nil {
 		log.Fatal("Failed to fetch real-time data:", err)
 	}
 
-	// fmt.Println("AAPL:", applData, "\nMSFT:", msftData)
+	exportedData := calculateSpread(stockdata1, stockdata2)
+	exportToCSV(exportedData, "spread_of_stock_prices.csv")
+	exportToCSV(stockdata1, "stock_price_1.csv")
+	exportToCSV(stockdata2, "stock_price_2.csv")
+	fmt.Println("Data exported to CSV successfully.")
 
-	graph(applData, msftData)
+	// fmt.Println("Stock Data 1:", stockdata1)
+	// fmt.Println("Stock Data 2:", stockdata2)
 
-	calculateCorrelation(applData)
-	calculateCorrelation(msftData)
+	// graphofhistoricalData(stockdata1, stockdata2)
+
+	// spreadGraph(stockdata1, stockdata2)
+
 }
 
-func graph(data1, data2 []float64) {
-
+func graphofhistoricalData(data1, data2 []float64) {
 	line := charts.NewLine()
 
 	// Set the title of the chart
@@ -99,7 +117,7 @@ func graph(data1, data2 []float64) {
 		}),
 	)
 
-	// Create x-axis values (week numbers)
+	// Create x-axis values (indices)
 	xData := make([]string, len(data1))
 	for i := range xData {
 		xData[i] = strconv.Itoa(i + 1)
@@ -119,26 +137,14 @@ func graph(data1, data2 []float64) {
 
 	// Add the data series to the chart
 	line.SetXAxis(xData).
-		AddSeries("AAPL", yData1).
-		AddSeries("MSFT", yData2)
-
-	// Set the line color for AAPL series
-	line.SetSeriesOptions(
-		charts.WithLineStyleOpts(opts.LineStyle{
-			Color: "#FF0000", // Red color for AAPL line
-			Width: 2,         // Line width
-		}),
-	)
-
-	// Set the line color for MSFT series
-	line.SetSeriesOptions(
-		charts.WithLineStyleOpts(opts.LineStyle{
-			Color: "#0000FF", // Blue color for MSFT line
-			Width: 2,         // Line width
-		}),
-	)
-
-	// Generate the HTML file with the chart
+		AddSeries("SPY", yData1).
+		AddSeries("NFLX", yData2).
+		SetGlobalOptions(
+			charts.WithYAxisOpts(opts.YAxis{}),
+			charts.WithDataZoomOpts(opts.DataZoom{
+				YAxisIndex: []int{0}, // Enable data zoom for the y-axis
+			}),
+		)
 	page := components.NewPage()
 	page.AddCharts(line)
 	f, err := os.Create("stock_prices.html")
@@ -147,50 +153,66 @@ func graph(data1, data2 []float64) {
 	}
 	page.Render(io.MultiWriter(f))
 
-	fmt.Println("Graph saved to stock_prices.html")
+	fmt.Println("Created Graph to show relationship between stock price")
 }
 
-func calculateCorrelation(tradingData []float64) {
-	// Calculate the mean value of the stock prices
-	mean := getMeanPrice(tradingData)
-
-	// Calculate the standard deviation of the stock prices
-	stdDev := getStandardDeviation(tradingData)
-
-	// Create a slice to store trading signals
-	signals := make([]int, len(tradingData))
-
-	// Generate trading signals based on mean reversion strategy
-	for i, val := range tradingData {
-		if val > mean+stdDev {
-			// Price is above the mean + standard deviation, consider selling
-			signals[i] = -1
-		} else if val < mean-stdDev {
-			// Price is below the mean - standard deviation, consider buying
-			signals[i] = 1
-		} else {
-			// Price is within the mean +/- standard deviation range, do nothing
-			signals[i] = 0
-		}
+func calculateSpread(data1, data2 []float64) []float64 {
+	if len(data1) != len(data2) {
+		// Ensure the input data slices have the same length
+		return nil
 	}
 
-	// Implement the trading strategy based on the signals
-	// For simplicity, let's assume we start with no position
-	position := 0
-
-	for i := 1; i < len(tradingData); i++ {
-		if signals[i] == 1 && position == 0 {
-			// Generate a buy signal and open a long position
-			position = 1
-			fmt.Printf("Buy at index %d\n", i)
-		} else if signals[i] == -1 && position == 1 {
-			// Generate a sell signal and close the long position
-			position = 0
-			fmt.Printf("Sell at index %d\n", i)
-		}
+	spread := make([]float64, len(data1))
+	for i := 0; i < len(data1); i++ {
+		spread[i] = data1[i] - data2[i]
 	}
+
+	return spread
 }
 
+func spreadGraph(data1, data2 []float64) {
+	line := charts.NewLine()
+
+	line.SetGlobalOptions(
+		charts.WithTitleOpts(opts.Title{
+			Title: "Stock Price Spread",
+		}),
+	)
+
+	// Calculate the spread between the stock prices
+	spreadData := calculateSpread(data1, data2)
+
+	xData := make([]string, len(spreadData))
+	for i := range xData {
+		xData[i] = strconv.Itoa(i + 1)
+	}
+
+	yData := make([]opts.LineData, len(spreadData))
+	for i, val := range spreadData {
+		yData[i] = opts.LineData{Value: val}
+	}
+
+	// Add the data series to the chart
+	line.SetXAxis(xData).
+		AddSeries("Spread", yData).
+		SetGlobalOptions(
+			charts.WithYAxisOpts(opts.YAxis{}),
+			charts.WithDataZoomOpts(opts.DataZoom{
+				YAxisIndex: []int{0},
+			}),
+		)
+	page := components.NewPage()
+	page.AddCharts(line)
+	f, err := os.Create("stock_price_spread.html")
+	if err != nil {
+		log.Fatal(err)
+	}
+	page.Render(io.MultiWriter(f))
+
+	fmt.Println("Created Graph to show stock price spread")
+}
+
+// Average of all the prices
 func getMeanPrice(prices []float64) float64 {
 	sum := 0.0
 	for _, price := range prices {
@@ -199,6 +221,8 @@ func getMeanPrice(prices []float64) float64 {
 	return sum / float64(len(prices))
 }
 
+// Denoted by Sqrt of Summation of value of each price minus the
+// mean price squared divided by the number of prices
 func getStandardDeviation(prices []float64) float64 {
 	mean := getMeanPrice(prices)
 	sum := 0.0
@@ -208,4 +232,24 @@ func getStandardDeviation(prices []float64) float64 {
 	}
 	variance := sum / float64(len(prices))
 	return math.Sqrt(variance)
+}
+
+func exportToCSV(data []float64, filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	for _, value := range data {
+		err := writer.Write([]string{strconv.FormatFloat(value, 'f', -1, 64)})
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
